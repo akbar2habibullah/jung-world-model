@@ -86,9 +86,10 @@ class DiffusionTransformer(nn.Module):
             
             # Linear projection over all tokens
             latent_tokens = self.fc_out(latent_tokens)
-        
-        # Return the predicted latent tokens (16x16 tokens for one frame)
-        return latent_tokens
+
+        decoded_input = latent_tokens.mean(dim=1) # Average over the tokens
+
+        return decoded_input  # Return the reshaped latent representation
 
 class WorldModel(nn.Module):
     def __init__(self):
@@ -114,12 +115,12 @@ class WorldModel(nn.Module):
         # Temporal Transformer (Ni)
         hidden_states, cond_embedding = self.temporal_transformer(z_seq)
         
-        # Diffusion Transformer (Ne) now predicts a full frame's latent tokens
-        latent_tokens = self.diffusion_transformer(cond_embedding)
-        
-        # VAE Decoding (Si) reconstructs the frame from latent tokens
-        output = self.decoder(latent_tokens)
-        
+        # Diffusion Transformer (Ne)
+        decoded_input = self.diffusion_transformer(cond_embedding)  # Get reshaped latent
+
+        # VAE Decoding (Si)
+        output = self.decoder(decoded_input)  # Decode the reshaped latent
+
         return output, mu, logvar
 
 def vae_loss(recon_x, x, mu, logvar):
