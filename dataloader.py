@@ -2,115 +2,113 @@ import torch
 import cv2
 import torchvision.transforms as transforms
 import os
-import glob
 
 from torch.utils.data import Dataset, DataLoader
 
-class VideoDatasetWithWindow(Dataset):
-    def __init__(self, video_dir, clip_len=240, stride=1, frame_size=(1024, 1024), transform=None):
-        """
-        Args:
-            video_dir (str): Directory where video files are located.
-            clip_len (int): Number of frames per clip (240 frames = 10 seconds at 24fps).
-            stride (int): Number of frames to move the window (e.g., 1 frame = fully overlapping, 240 = non-overlapping).
-            frame_size (tuple): Size of each frame (default 1024x1024).
-            transform (callable, optional): Optional transform to be applied on a sample.
-        """
-        self.video_dir = video_dir
+class VideoDataset(Dataset):
+    def __init__(self, video_path, phase, clip_len=240, stride=120, frame_size=(256, 256), transform=None):
+        self.video_path = video_path
         self.clip_len = clip_len
         self.stride = stride
         self.frame_size = frame_size
         self.transform = transform
+        self.phase = phase
 
-        # Get the list of video file paths
-        self.video_files = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))
+        if not os.path.exists(self.video_path):
+            raise FileNotFoundError(f"Video file not found: {self.video_path}")
 
-    def __len__(self):
-        # Calculate total number of windows across all videos
-        total_windows = 0
-        for video_file in self.video_files:
-            total_frames = self._get_total_frames(video_file)
-            total_windows += (total_frames - self.clip_len) // self.stride + 1
-        return total_windows
+        self.total_frames = self._get_total_frames(self.video_path)
 
-    def _get_total_frames(self, video_file):
-        # Use OpenCV to get the total number of frames in the video
-        cap = cv2.VideoCapture(video_file)
+    def _get_total_frames(self, video_path):
+        cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
         return total_frames
+        
+    def __len__(self):
+        if self.phase == 1:  # For VAE training, use the entire video
+            # Ensure the result is non-negative by using max(0, ...)
+            length = (self.total_frames - self.clip_len) // self.stride + 1
+            # Print length to check if it's 0
+            print(f"Dataset length (phase 1): {length}")  # Add this line for debugging
+            return max(0, length)  # Return 0 if length is negative
+        else:  # For transformer and full model training, predict the last frame
+            # Ensure the result is non-negative by using max(0, ...)
+            length = self.total_frames - self.clip_len  # Number of possible starting frames
+            # Print length to check if it's 0
+            print(f"Dataset length (phase 2/3): {length}")  # Add this line for debugging
+            return max(0, length)  # Return 0 if length is negative
+
 
     def __getitem__(self, idx):
-        # Find which video the index corresponds to and where the window starts
-        video_idx, window_start_frame = self._find_video_and_frame(idx)
 
-        # Load the corresponding video CAPTURE OBJECT (not all frames at once!)
-        cap = cv2.VideoCapture(self.video_files[video_idx])
+        cap = cv2.VideoCapture(self.video_path)
 
-        clip = []
-        for i in range(self.clip_len):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, window_start_frame + i)
-            ret, frame = cap.read()
+        if self.phase == 1:  # VAE training (return clips)
+            start_frame = idx * self.stride
+            clip = []
+            for i in range(self.clip_len):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame + i)
+                ret, frame = cap.read()
+                if not ret:
+                    frame = torch.zeros(3, *self.frame_size, dtype=torch.uint8)
+                else:
+                    frame = torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
+                    frame = transforms.functional.resize(frame, self.frame_size)
+                clip.append(frame)
+            clip = torch.stack(clip)
+
+        else: # Transformer and full model training (return sequence and target last frame)
+            start_frame = idx
+            clip = [] #Sequence
+            for i in range(self.clip_len): # Sequence frames
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame + i)
+                ret, frame = cap.read()
+                if not ret:
+                    frame = torch.zeros(3, *self.frame_size, dtype=torch.uint8)
+                else:
+                    frame = torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
+                    frame = transforms.functional.resize(frame, self.frame_size)
+                clip.append(frame)
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame + self.clip_len) # Target frame
+            ret, target_frame = cap.read()
             if not ret:
-                # Handle the case where the video ends before the clip is complete
-                # You might want to pad with zeros or raise an error.
-                frame = torch.zeros(3, *self.frame_size, dtype=torch.uint8)  # Example: Pad with black frames
+                target_frame = torch.zeros(3, *self.frame_size, dtype=torch.uint8)
             else:
-                frame = torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
-                frame = transforms.functional.resize(frame, self.frame_size)
-            clip.append(frame)
+                target_frame = torch.from_numpy(cv2.cvtColor(target_frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
+                target_frame = transforms.functional.resize(target_frame, self.frame_size)
+            clip = torch.stack(clip)
+
         cap.release()
 
-        clip = torch.stack(clip)
 
-    def _find_video_and_frame(self, idx):
-        """
-        Find the video and the start frame for the window based on the global index.
-        """
-        total_frames_so_far = 0
-
-        for video_idx, video_file in enumerate(self.video_files):
-            total_frames_in_video = self._get_total_frames(video_file)
-            total_windows_in_video = (total_frames_in_video - self.clip_len) // self.stride + 1
-
-            if idx < total_windows_in_video:
-                # The index belongs to this video
-                window_start_frame = idx * self.stride
-                return video_idx, window_start_frame
+        if self.transform:
+            if self.phase == 1:
+                clip = self.transform(clip)
             else:
-                # Skip this video and continue searching
-                idx -= total_windows_in_video
+                clip = self.transform(clip)
+                target_frame = self.transform(target_frame)
 
-        raise IndexError("Index out of range in the dataset")
 
-    def _load_video_frames(self, video_file):
-        """
-        Load all the frames of the video using OpenCV.
-        """
-        cap = cv2.VideoCapture(video_file)
-        frames = []
+        if self.phase == 1:
+          return clip
+        else:
+          return clip, target_frame
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = torch.from_numpy(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
-            frames.append(frame)
-        
-        cap.release()
-        return frames
-    
-# Example normalization transform (if needed)
+video_path = "video.mp4"  # Provide the local path to your video file
+
 video_transform = transforms.Compose([
     transforms.Lambda(lambda x: x / 255.0),  # Normalize to [0, 1]
+    transforms.ConvertImageDtype(torch.float)
 ])
 
-# Create the dataset with sliding window
-video_dataset = VideoDatasetWithWindow(video_dir="/path/to/your/video/files", 
-                                       clip_len=240,  # 10 seconds of video at 24fps
-                                       stride=120,    # Window stride (e.g., 120 = 5-second overlap)
-                                       frame_size=(1024, 1024),
-                                       transform=video_transform)
+# Create dataloaders for each training phase
 
-# Create the DataLoader
-video_loader = DataLoader(video_dataset, batch_size=4, shuffle=True, num_workers=4)
+# Phase 1: VAE Training
+vae_dataset = VideoDataset(video_path, phase=1, clip_len=48, stride=12, frame_size=(256, 256), transform=video_transform)
+vae_dataloader = DataLoader(vae_dataset, batch_size=1, shuffle=True, num_workers=4)
+
+# Phase 2 & 3: Transformer and Full Model Training
+transformer_dataset = VideoDataset(video_path, phase=2, clip_len=12, stride=6, frame_size=(256, 256), transform=video_transform)  # Use phase=2 or 3
+transformer_dataloader = DataLoader(transformer_dataset, batch_size=1, shuffle=False, num_workers=4)  # Don't shuffle for next-frame prediction
