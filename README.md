@@ -28,3 +28,29 @@ The model is trained in three phases:
 
 
 This architecture allows the model to learn a compressed representation of the world, capture temporal dependencies, and generate future frames, effectively building a "world model" from video data.
+
+## Limited Experiment Results
+
+With very little training (20 Epochs VAE training, 10 Epochs transformer model, 5 Epochs full join training, a single video loop of 6 seconds 16 fps, training time around 1 hour) the model can reconstruct the frame like this:
+
+- Before training:
+
+![Before training](before.png)
+
+- After training:
+
+![After training](after.png)
+
+### Comparation with CNN + LSTM based frame prediction models
+
+- Before training:
+
+![Before training](beforeCNN.png)
+
+- After 1 epoch training
+
+![After 1 epoch training](afterCNN.png)
+
+- After 50 epoch training
+
+![After 50 epoch training](after50CNN.png)
